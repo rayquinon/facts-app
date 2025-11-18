@@ -2,8 +2,9 @@
 
 import 'package:flutter/material.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
-import 'package:firebase_storage/firebase_storage.dart'; 
-import 'dart:typed_data';
+import 'package:firebase_storage/firebase_storage.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+
 import 'package:flutter/foundation.dart' show kIsWeb; 
 import 'dart:io' show File, Platform;
 import 'package:camera/camera.dart'; 
@@ -43,6 +44,13 @@ class _FaceScanPageState extends State<FaceScanPage> {
   FaceScanState _currentState = FaceScanState.straight; // Start with straight pose
   int _captureCount = 0;
   final int _maxCapturesPerPose = 10;
+  // Overall captures across all poses (3 poses * 10 captures = 30)
+  int _totalCaptured = 0;
+  final int _expectedTotalCaptures = 3 * 10;
+  // Keep track of uploaded storage paths for this enrollment
+  final List<String> _uploadedFiles = [];
+  // Keep track of public download URLs for easier access by recognition services
+  final List<String> _uploadedUrls = [];
   
   // --- UI State ---
   bool _isCameraInitialized = false;
@@ -142,15 +150,29 @@ class _FaceScanPageState extends State<FaceScanPage> {
       final XFile image = await _cameraController!.takePicture();
 
       // 2. Face Validation Logic (Ensuring one face is present)
-      final inputImage = InputImage.fromFilePath(image.path);
-      final List<Face> faces = await _faceDetector.processImage(inputImage);
-      
-      if (faces.length != 1) {
+      try {
+        if (kIsWeb) {
+          // MLKit face detection may not behave the same on web for XFile paths.
+          // Fall back to optimistic validation on web (skip strict face count check).
+        } else {
+          final inputImage = InputImage.fromFilePath(image.path);
+          final List<Face> faces = await _faceDetector.processImage(inputImage);
+          if (faces.length == 1) {
+          } else {
+            setState(() {
+              _statusMessage = faces.isEmpty
+                  ? 'No face detected. Please ensure your face is fully visible.'
+                  : 'Multiple faces detected. Ensure only your face is in the frame.';
+              _isProcessing = false; // Allow retry
+            });
+            return;
+          }
+        }
+      } catch (e) {
+        // If face detection fails for any reason, allow retry but log the error
         setState(() {
-          _statusMessage = faces.isEmpty 
-              ? 'No face detected. Please ensure your face is fully visible.' 
-              : 'Multiple faces detected. Ensure only your face is in the frame.';
-          _isProcessing = false; // Allow retry
+          _statusMessage = 'Face validation failed: ${e.toString()}. Please retry.';
+          _isProcessing = false;
         });
         return;
       }
@@ -166,27 +188,55 @@ class _FaceScanPageState extends State<FaceScanPage> {
           .child(widget.userIdentifier) 
           .child('${poseName}_$fileIndex.jpg'); 
 
-      UploadTask uploadTask;
-      if (kIsWeb) {
-        Uint8List bytes = await image.readAsBytes();
-        uploadTask = storageRef.putData(bytes);
-      } else {
-        uploadTask = storageRef.putFile(File(image.path));
+      // 3. STORE (Upload Image to Firebase Storage) with retry
+      Future<void> uploadWithRetry(Reference ref, XFile file) async {
+        const int maxUploadAttempts = 3;
+        int attempt = 0;
+        while (true) {
+          attempt++;
+          try {
+            if (kIsWeb) {
+              final bytes = await file.readAsBytes();
+              await ref.putData(bytes).whenComplete(() {});
+            } else {
+              await ref.putFile(File(file.path)).whenComplete(() {});
+            }
+            return;
+          } catch (e) {
+            if (attempt >= maxUploadAttempts) rethrow;
+            await Future.delayed(Duration(milliseconds: 500 * attempt));
+          }
+        }
       }
 
-      await uploadTask.whenComplete(() {});
+      await uploadWithRetry(storageRef, image);
+      // Record the uploaded file path for later use (attendance/recognition mapping)
+      try {
+        _uploadedFiles.add(storageRef.fullPath);
+      } catch (_) {
+        // If fullPath isn't available for some reason, ignore silently
+      }
+      // Also attempt to get a download URL and save it for immediate use by recognition
+      try {
+        final url = await storageRef.getDownloadURL();
+        _uploadedUrls.add(url);
+      } catch (e) {
+        // If we cannot get a download URL (security rules or timing), continue without it
+        print('Warning: could not get download URL for ${storageRef.fullPath}: $e');
+      }
 
       // 4. Update State and Transition
       _captureCount++;
+      _totalCaptured++;
 
       if (_captureCount >= _maxCapturesPerPose) {
         _transitionToNextState();
       } else {
          // Update UI to show successful capture, stay in the loop
-         setState(() {
-            _statusMessage = 'Capture successful. Ready for capture ${(_captureCount + 1)} of $_maxCapturesPerPose.';
-            _isProcessing = false; 
-         });
+        setState(() {
+          _statusMessage = 'Capture successful. Ready for capture ${(_captureCount + 1)} of $_maxCapturesPerPose.';
+          _isProcessing = false;
+        });
       }
 
     } on FirebaseException catch (e) {
@@ -227,17 +277,42 @@ class _FaceScanPageState extends State<FaceScanPage> {
 
   /// Finalizes the enrollment and sends the success signal.
   Future<void> _finalizeEnrollment() async {
-    // In a real application, this is where you might initiate background 
-    // processing on the 30 uploaded images (e.g., generating a feature vector).
-    await Future.delayed(const Duration(seconds: 2)); // Simulate final processing
-    
     setState(() {
-      _currentState = FaceScanState.complete;
+      _statusMessage = 'Finalizing enrollment...';
+      _currentState = FaceScanState.processing;
     });
 
-    // 5. RETURN Success Signal
-    if (mounted) {
-      Navigator.pop(context, true); 
+    try {
+      // Simulate final processing time and optionally write a marker to Firestore
+      await Future.delayed(const Duration(seconds: 2));
+
+      // Persist enrollment metadata to Firestore so the recognition service can use it later.
+      try {
+        final docRef = FirebaseFirestore.instance.collection('face_enrollments').doc(widget.userIdentifier);
+        await docRef.set({
+          'userIdentifier': widget.userIdentifier,
+          'uploadedFiles': _uploadedFiles,
+          'uploadedUrls': _uploadedUrls,
+          'completed': true,
+          'createdAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+      } catch (e) {
+        // Log but don't fail finalization if Firestore write fails
+        print('Warning: failed to write face enrollment metadata: $e');
+      }
+
+      setState(() {
+        _currentState = FaceScanState.complete;
+        _statusMessage = 'Enrollment successful! Returning to registration.';
+      });
+
+      if (mounted) Navigator.pop(context, true);
+    } catch (e) {
+      setState(() {
+        _statusMessage = 'Finalization failed: ${e.toString()}';
+        _currentState = FaceScanState.processing;
+      });
+      if (mounted) Navigator.pop(context, false);
     }
   }
 
@@ -289,6 +364,9 @@ class _FaceScanPageState extends State<FaceScanPage> {
                   textAlign: TextAlign.center,
                   style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                 ),
+                const SizedBox(height: 8),
+                // Overall progress across all poses
+                Text('Captured $_totalCaptured / $_expectedTotalCaptures images', style: const TextStyle(fontSize: 14)),
                 const SizedBox(height: 20),
 
                 // Camera Preview Widget
