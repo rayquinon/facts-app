@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "209814555296",
+    "project_id": "facts-app-bd7ef",
+    "storage_bucket": "facts-app-bd7ef.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:209814555296:android:4ac68426bfd66e2076d7c5",
+        "android_client_info": {
+          "package_name": "com.example.facts_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBmDX7RG5VYnRiLKvFNNNkXxu2XlXzVJPQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
