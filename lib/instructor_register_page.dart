@@ -1,4 +1,7 @@
 // instructor_register_page.dart
+// Ignore build-context-synchronously warnings in this registration flow where
+// we carefully check `mounted` before using `context` after awaits.
+// ignore_for_file: use_build_context_synchronously
 import 'package:flutter/material.dart';
 import 'auth_service.dart'; // Handles Firebase Auth and Firestore write (You must have this file)
 import 'user_type_enum.dart'; // Imports the separated UserType enum (You must have this file)

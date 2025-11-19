@@ -2,7 +2,7 @@
 
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show kIsWeb, compute;
 import 'dart:typed_data';
 import 'dart:convert';
 import 'dart:io';
@@ -52,6 +52,11 @@ class ClassInfo {
       schedules: map['schedules'] ?? '',
     );
   }
+}
+
+// Top-level parser used with compute()
+Map<String, dynamic> _parseJson(String jsonText) {
+  return jsonDecode(jsonText) as Map<String, dynamic>;
 }
 
 class ClassConfigPage extends StatefulWidget {
@@ -195,25 +200,23 @@ class _ClassConfigPageState extends State<ClassConfigPage> {
       String cleanJson = text.trim().replaceAll('```json', '').replaceAll('```', '');
       
       try {
-         final data = jsonDecode(cleanJson) as Map<String, dynamic>;
+        final data = await compute(_parseJson, cleanJson);
+        // Use the null-aware operator and toString() for safer type handling
+        _subjectCodeController.text = data['subjectCode']?.toString() ?? '';
+        _subjectTitleController.text = data['subjectTitle']?.toString() ?? '';
+        _classSectionController.text = data['classSection']?.toString() ?? '';
+        _facultyController.text = data['faculty']?.toString() ?? '';
          
-         // Use the null-aware operator and toString() for safer type handling
-         _subjectCodeController.text = data['subjectCode']?.toString() ?? '';
-         _subjectTitleController.text = data['subjectTitle']?.toString() ?? '';
-         _classSectionController.text = data['classSection']?.toString() ?? '';
-         _facultyController.text = data['faculty']?.toString() ?? '';
-         
-         // Robustly handle schedules as a List, defaulting to a comma-separated string
-         if (data['schedules'] is List) {
-            _schedulesController.text = (data['schedules'] as List).join(', ');
-         } else {
-            _schedulesController.text = data['schedules']?.toString() ?? '';
-         }
-         
+        // Robustly handle schedules as a List, defaulting to a comma-separated string
+        if (data['schedules'] is List) {
+          _schedulesController.text = (data['schedules'] as List).join(', ');
+        } else {
+          _schedulesController.text = data['schedules']?.toString() ?? '';
+        }
       } on FormatException {
-         _showError('AI output is not a valid JSON format. Check the PDF content.');
+        _showError('AI output is not a valid JSON format. Check the PDF content.');
       } on TypeError {
-         _showError('AI output is malformed (missing required fields).');
+        _showError('AI output is malformed (missing required fields).');
       }
 
     } catch (e) {
@@ -276,7 +279,7 @@ class _ClassConfigPageState extends State<ClassConfigPage> {
     // 3. Save to Firestore in the background (Fire and Forget)
     // We use .set() because we already generated the reference
     docRef.set(newClassMap).catchError((error) {
-      print("Error saving class in background: $error");
+      debugPrint("Error saving class in background: $error");
     });
 
     // 4. Close screen immediately (No waiting!)

@@ -1,9 +1,7 @@
 // user_type_selector_page.dart - FIXED
 
 import 'package:flutter/material.dart';
-import 'instructor_register_page.dart';
-// 1. ADD THE MISSING IMPORT
-import 'student_register_page.dart'; 
+import 'app_routes.dart';
 
 class UserTypeSelectorPage extends StatelessWidget {
   const UserTypeSelectorPage({super.key});
@@ -33,11 +31,7 @@ class UserTypeSelectorPage extends StatelessWidget {
                 // Instructor Button
                 ElevatedButton.icon(
                   onPressed: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                          builder: (context) => const InstructorRegisterPage()),
-                    );
+                    Navigator.pushNamed(context, AppRoutes.instructorRegister);
                   },
                   icon: const Icon(Icons.work_outline, size: 28),
                   label: const Text('I am an Instructor',
@@ -51,13 +45,7 @@ class UserTypeSelectorPage extends StatelessWidget {
                 // Student Button - FIX APPLIED HERE
                 ElevatedButton.icon(
                   onPressed: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        // 2. REPLACED PLACEHOLDER with the actual page
-                        builder: (context) => StudentRegisterPage(), 
-                      ),
-                    );
+                    Navigator.pushNamed(context, AppRoutes.studentRegister);
                   },
                   icon: const Icon(Icons.school_outlined, size: 28),
                   label:

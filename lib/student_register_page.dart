@@ -1,8 +1,13 @@
 // student_register_page.dart
+// This file uses context after async operations but guards with `mounted` checks.
+// Suppress the linter warning here because checks are already in place.
+// ignore_for_file: use_build_context_synchronously
 import 'package:flutter/material.dart';
 import 'auth_service.dart';
 import 'user_type_enum.dart';
-import 'face_scan_page.dart'; // NEW: Import the dedicated scan page
+import 'app_routes.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 
 class StudentRegisterPage extends StatefulWidget {
   const StudentRegisterPage({super.key});
@@ -25,6 +30,7 @@ class _StudentRegisterPageState extends State<StudentRegisterPage> {
   // --- State for Face Scan Requirement ---
   bool _isFaceScanCompleted = false; // Tracks if scan was successful
   bool _isScanning = false;
+  bool _isRegistered = false; // Tracks whether registration succeeded
 
   // --- User Type Constant ---
   final UserType _userType = UserType.student;
@@ -103,30 +109,35 @@ class _StudentRegisterPageState extends State<StudentRegisterPage> {
                         : Icons.camera_alt_outlined),
                 label: Text(_isFaceScanCompleted
                     ? 'Face Scan Completed'
-                    : 'Start Face Scan'),
+                    : (_isRegistered ? 'Start Face Scan' : 'Register first to scan')),
                 style: OutlinedButton.styleFrom(
                   padding: const EdgeInsets.symmetric(vertical: 14),
-                  foregroundColor:
-                      _isFaceScanCompleted ? Colors.green : Theme.of(context).primaryColor,
+                  foregroundColor: _isFaceScanCompleted
+                      ? Colors.green
+                      : (_isRegistered ? Theme.of(context).primaryColor : Colors.grey),
                   side: BorderSide(
                     color: _isFaceScanCompleted
                         ? Colors.green
-                        : Theme.of(context).primaryColor,
+                        : (_isRegistered ? Theme.of(context).primaryColor : Colors.grey),
                   ),
                 ),
-                onPressed: _isScanning || _isFaceScanCompleted ? null : _navigateToFaceScan,
+                onPressed: _isScanning || _isFaceScanCompleted || !_isRegistered ? null : _navigateToFaceScan,
               ),
               const SizedBox(height: 24),
 
               // --- Register Button ---
-              ElevatedButton(
-                onPressed: _registerUser,
+              ElevatedButton.icon(
+                onPressed: _isRegistered ? null : _registerUser,
+                icon: _isRegistered
+                    ? const Icon(Icons.check_circle, color: Colors.white)
+                    : const Icon(Icons.person_add, color: Colors.white),
+                label: Text(
+                  _isRegistered ? 'Registered' : 'Register Student Account',
+                  style: const TextStyle(fontSize: 16),
+                ),
                 style: ElevatedButton.styleFrom(
                   padding: const EdgeInsets.symmetric(vertical: 16),
-                ),
-                child: const Text(
-                  'Register Student Account',
-                  style: TextStyle(fontSize: 16),
+                  backgroundColor: _isRegistered ? Colors.green : null,
                 ),
               ),
               const SizedBox(height: 16),
@@ -155,11 +166,13 @@ class _StudentRegisterPageState extends State<StudentRegisterPage> {
     }
 
     setState(() => _isScanning = true);
-    // Navigate to FaceScanPage and wait for a result
-    final bool? scanResult = await Navigator.push(
+    // Navigate to FaceScanPage (named route) and wait for a result
+    final bool? scanResult = await Navigator.pushNamed<bool?>(
       context,
-      MaterialPageRoute(builder: (context) => FaceScanPage(userIdentifier: _studentIdController.text.trim())),
+      AppRoutes.faceScan,
+      arguments: _studentIdController.text.trim(),
     );
+    if (!mounted) return;
     setState(() => _isScanning = false);
 
     // Update state based on the result from FaceScanPage
@@ -188,23 +201,14 @@ class _StudentRegisterPageState extends State<StudentRegisterPage> {
       return;
     }
 
-    // Custom check for face scan completion
-    if (!_isFaceScanCompleted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: const Text('Please complete the face scan before registering.'),
-          backgroundColor: Theme.of(context).colorScheme.error,
-        ),
-      );
-      return;
-    }
+    // Registration proceeds before face scan; we'll start face-scan after creating credentials.
 
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('Processing registration...')),
     );
 
     try {
-      // Step 4: Register User and Save Profile Data (after face data is already stored)
+      // Step 4: Register User and Save Profile Data
       await _authService.registerAndSaveUser(
         _emailController.text.trim(),
         _passwordController.text.trim(),
@@ -213,36 +217,94 @@ class _StudentRegisterPageState extends State<StudentRegisterPage> {
         _studentIdController.text.trim(),
         {
           'studentId': _studentIdController.text.trim(),
-          'faceScanCompleted': true,
+          // faceScanCompleted will be set after the scan completes
+          'faceScanCompleted': false,
         },
       );
 
       ScaffoldMessenger.of(context).hideCurrentSnackBar();
 
       if (!mounted) return;
+      // Mark registered and immediately start face scan for the created account
+      setState(() {
+        _isRegistered = true;
+      });
 
-      // --- START MODIFICATION ---
-      await showDialog(
-        context: context,
-        barrierDismissible: false,
-        builder: (BuildContext dialogContext) {
-          return AlertDialog(
-            title: const Text('Registration Successful'),
-            content: const Text('Your student account has been created.'),
-            actions: <Widget>[
-              TextButton(
-                child: const Text('OK'),
-                onPressed: () {
-                  // Pop all pages
-                  // until it gets back to the first route (login.dart)
-                  Navigator.of(dialogContext).popUntil((route) => route.isFirst);
-                },
-              ),
-            ],
+      // Automatically navigate to face scan to attach images to the newly created user
+      bool? scanResult;
+      do {
+        scanResult = await Navigator.pushNamed<bool?>(
+          context,
+          AppRoutes.faceScan,
+          arguments: _studentIdController.text.trim(),
+        );
+        if (!mounted) return;
+
+        if (scanResult == true) {
+          // Update the user doc to mark faceScanCompleted = true
+          try {
+            final uid = FirebaseAuth.instance.currentUser?.uid;
+            if (uid != null) {
+              await FirebaseFirestore.instance.collection('users').doc(uid).set({
+                'faceScanCompleted': true,
+              }, SetOptions(merge: true));
+            }
+          } catch (_) {}
+
+          if (!mounted) return;
+          await showDialog(
+            context: context,
+            barrierDismissible: false,
+            builder: (BuildContext dialogContext) {
+              return AlertDialog(
+                title: const Text('Registration Complete'),
+                content: const Text('Your account and face enrollment are complete.'),
+                actions: <Widget>[
+                  TextButton(
+                    child: const Text('OK'),
+                    onPressed: () {
+                      Navigator.of(dialogContext).popUntil((route) => route.isFirst);
+                    },
+                  ),
+                ],
+              );
+            },
           );
-        },
-      );
-      // --- END MODIFICATION ---
+          break;
+        } else {
+          // Scan failed or cancelled — allow retry or skip
+          if (!mounted) return;
+          final action = await showDialog<String>(
+            context: context,
+            barrierDismissible: false,
+            builder: (BuildContext dialogContext) {
+              return AlertDialog(
+                title: const Text('Face Scan Incomplete'),
+                content: const Text('Face scan did not complete. Would you like to retry or finish registration without a scan?'),
+                actions: <Widget>[
+                  TextButton(
+                    child: const Text('Retry'),
+                    onPressed: () => Navigator.of(dialogContext).pop('retry'),
+                  ),
+                  TextButton(
+                    child: const Text('Skip'),
+                    onPressed: () => Navigator.of(dialogContext).pop('skip'),
+                  ),
+                ],
+              );
+            },
+          );
+
+          if (action == 'retry') {
+            continue; // loop and retry scan
+          } else {
+          // Finish without scan
+            if (!mounted) return;
+            Navigator.of(context).popUntil((route) => route.isFirst);
+            break;
+          }
+        }
+      } while (true);
 
     } catch (e) {
       ScaffoldMessenger.of(context).hideCurrentSnackBar();

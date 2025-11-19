@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
 import 'package:flutter/foundation.dart' show kIsWeb; 
 import 'dart:io' show File, Platform;
@@ -47,6 +48,12 @@ class _FaceScanPageState extends State<FaceScanPage> {
   // Overall captures across all poses (3 poses * 10 captures = 30)
   int _totalCaptured = 0;
   final int _expectedTotalCaptures = 3 * 10;
+  // Per-pose captured counts to show progress even after transitioning
+  final Map<FaceScanState, int> _poseCaptured = {
+    FaceScanState.straight: 0,
+    FaceScanState.left: 0,
+    FaceScanState.right: 0,
+  };
   // Keep track of uploaded storage paths for this enrollment
   final List<String> _uploadedFiles = [];
   // Keep track of public download URLs for easier access by recognition services
@@ -55,6 +62,7 @@ class _FaceScanPageState extends State<FaceScanPage> {
   // --- UI State ---
   bool _isCameraInitialized = false;
   bool _isProcessing = false;
+  bool _autoCapturing = false; // When true, automatic repeated captures are running
   String _statusMessage = 'Initializing camera...';
 
   @override
@@ -181,11 +189,13 @@ class _FaceScanPageState extends State<FaceScanPage> {
       final poseName = _currentState.name;
       final fileIndex = (_captureCount + 1).toString().padLeft(2, '0');
       
-      // Example Path: 'student_faces/S123456/straight_01.jpg'
-      Reference storageRef = FirebaseStorage.instance
+        // Prefer storing under authenticated user's UID; fall back to provided identifier
+        final String uid = FirebaseAuth.instance.currentUser?.uid ?? widget.userIdentifier;
+        // Example Path: 'student_faces/{uid}/straight_01.jpg'
+        Reference storageRef = FirebaseStorage.instance
           .ref()
           .child('student_faces')
-          .child(widget.userIdentifier) 
+          .child(uid)
           .child('${poseName}_$fileIndex.jpg'); 
 
       // 3. STORE (Upload Image to Firebase Storage) with retry
@@ -222,15 +232,17 @@ class _FaceScanPageState extends State<FaceScanPage> {
         _uploadedUrls.add(url);
       } catch (e) {
         // If we cannot get a download URL (security rules or timing), continue without it
-        print('Warning: could not get download URL for ${storageRef.fullPath}: $e');
+        debugPrint('Warning: could not get download URL for ${storageRef.fullPath}: $e');
       }
 
       // 4. Update State and Transition
       _captureCount++;
       _totalCaptured++;
+      // update per-pose counter (persist count even after transitioning)
+      _poseCaptured[_currentState] = _captureCount;
 
       if (_captureCount >= _maxCapturesPerPose) {
-        _transitionToNextState();
+        await _transitionToNextState();
       } else {
          // Update UI to show successful capture, stay in the loop
         setState(() {
@@ -261,18 +273,24 @@ class _FaceScanPageState extends State<FaceScanPage> {
   }
 
   /// Moves the workflow to the next enrollment phase.
-  void _transitionToNextState() {
+  Future<void> _transitionToNextState() async {
     setState(() {
       _captureCount = 0;
       if (_currentState == FaceScanState.straight) {
-        _currentState = FaceScanState.right;
-      } else if (_currentState == FaceScanState.right) {
         _currentState = FaceScanState.left;
       } else if (_currentState == FaceScanState.left) {
+        _currentState = FaceScanState.right;
+      } else if (_currentState == FaceScanState.right) {
         _currentState = FaceScanState.processing;
         _finalizeEnrollment(); // All captures done, finalize.
       }
     });
+
+    // If we're auto-capturing, begin the next pose automatically after a short delay
+    if (_autoCapturing && _currentState != FaceScanState.processing && _currentState != FaceScanState.complete) {
+      await Future.delayed(const Duration(milliseconds: 700));
+      if (mounted) await _captureCurrentPose();
+    }
   }
 
   /// Finalizes the enrollment and sends the success signal.
@@ -288,8 +306,10 @@ class _FaceScanPageState extends State<FaceScanPage> {
 
       // Persist enrollment metadata to Firestore so the recognition service can use it later.
       try {
-        final docRef = FirebaseFirestore.instance.collection('face_enrollments').doc(widget.userIdentifier);
+        final String uid = FirebaseAuth.instance.currentUser?.uid ?? widget.userIdentifier;
+        final docRef = FirebaseFirestore.instance.collection('face_enrollments').doc(uid);
         await docRef.set({
+          'uid': uid,
           'userIdentifier': widget.userIdentifier,
           'uploadedFiles': _uploadedFiles,
           'uploadedUrls': _uploadedUrls,
@@ -298,12 +318,13 @@ class _FaceScanPageState extends State<FaceScanPage> {
         }, SetOptions(merge: true));
       } catch (e) {
         // Log but don't fail finalization if Firestore write fails
-        print('Warning: failed to write face enrollment metadata: $e');
+        debugPrint('Warning: failed to write face enrollment metadata: $e');
       }
 
       setState(() {
         _currentState = FaceScanState.complete;
         _statusMessage = 'Enrollment successful! Returning to registration.';
+        _autoCapturing = false;
       });
 
       if (mounted) Navigator.pop(context, true);
@@ -311,6 +332,7 @@ class _FaceScanPageState extends State<FaceScanPage> {
       setState(() {
         _statusMessage = 'Finalization failed: ${e.toString()}';
         _currentState = FaceScanState.processing;
+        _autoCapturing = false;
       });
       if (mounted) Navigator.pop(context, false);
     }
@@ -367,6 +389,18 @@ class _FaceScanPageState extends State<FaceScanPage> {
                 const SizedBox(height: 8),
                 // Overall progress across all poses
                 Text('Captured $_totalCaptured / $_expectedTotalCaptures images', style: const TextStyle(fontSize: 14)),
+                const SizedBox(height: 8),
+                // Per-pose progress
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text('Straight ${_poseCaptured[FaceScanState.straight] ?? 0}/$_maxCapturesPerPose', style: const TextStyle(fontSize: 13)),
+                    const SizedBox(width: 12),
+                    Text('Left ${_poseCaptured[FaceScanState.left] ?? 0}/$_maxCapturesPerPose', style: const TextStyle(fontSize: 13)),
+                    const SizedBox(width: 12),
+                    Text('Right ${_poseCaptured[FaceScanState.right] ?? 0}/$_maxCapturesPerPose', style: const TextStyle(fontSize: 13)),
+                  ],
+                ),
                 const SizedBox(height: 20),
 
                 // Camera Preview Widget
@@ -390,14 +424,24 @@ class _FaceScanPageState extends State<FaceScanPage> {
                 
                 // The main action button
                 ElevatedButton.icon(
-                  onPressed: _isProcessing || _currentState == FaceScanState.complete ? null : _captureCurrentPose,
+                  onPressed: _isProcessing || _currentState == FaceScanState.complete
+                      ? null
+                      : () {
+                          if (!_autoCapturing) {
+                            setState(() {
+                              _autoCapturing = true;
+                              _statusMessage = 'Starting automatic capture...';
+                            });
+                            _captureCurrentPose();
+                          }
+                        },
                   icon: _isProcessing
                       ? const SizedBox(
                           height: 20, width: 20,
                           child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
                         )
                       : const Icon(Icons.camera_alt),
-                  label: Text(_isProcessing ? 'Capturing & Uploading...' : 'Capture Face'),
+                  label: Text(_autoCapturing || _isProcessing ? 'Scanning...' : 'Start Scan'),
                   style: ElevatedButton.styleFrom(
                     padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 15),
                     backgroundColor: Colors.blueAccent,
@@ -405,9 +449,29 @@ class _FaceScanPageState extends State<FaceScanPage> {
                   ),
                 ),
                 const SizedBox(height: 16),
-                TextButton(
-                  onPressed: _isProcessing || _currentState == FaceScanState.complete ? null : () => Navigator.pop(context, null), 
-                  child: const Text('Cancel Enrollment'),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    TextButton(
+                      onPressed: _isProcessing || _currentState == FaceScanState.complete ? null : () => Navigator.pop(context, null), 
+                      child: const Text('Cancel Enrollment'),
+                    ),
+                    const SizedBox(width: 12),
+                    // Restart current pose (clears captured count for the pose)
+                    TextButton(
+                      onPressed: (!_isProcessing && _currentState != FaceScanState.processing && _currentState != FaceScanState.complete)
+                          ? () {
+                              setState(() {
+                                _poseCaptured[_currentState] = 0;
+                                _captureCount = 0;
+                                _statusMessage = 'Restarted ${_currentState.name} pose. Ready to capture.';
+                                _autoCapturing = false;
+                              });
+                            }
+                          : null,
+                      child: const Text('Restart Pose'),
+                    ),
+                  ],
                 ),
               ],
             ),

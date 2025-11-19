@@ -1,6 +1,7 @@
 // auth_service.dart
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'app_routes.dart';
 
 class AuthService {
   // Get instances of Firebase Auth and Firestore
@@ -59,6 +60,47 @@ class AuthService {
 
     } on FirebaseAuthException catch (e) {
       // Re-throw the error so the UI can catch it and show a SnackBar
+      throw Exception(e.message);
+    } catch (e) {
+      throw Exception('An unknown error occurred: $e');
+    }
+  }
+
+  /// Logs in a user and navigates to the appropriate page based on their role.
+  Future<void> loginUser(String email, String password, Function(String route) navigate) async {
+    try {
+      // Sign in the user with Firebase Authentication
+      UserCredential userCredential =
+          await _firebaseAuth.signInWithEmailAndPassword(
+        email: email,
+        password: password,
+      );
+
+      // Get the user's UID
+      String uid = userCredential.user!.uid;
+
+      // Fetch the user's data from Firestore
+      DocumentSnapshot userDoc =
+          await _firestore.collection('users').doc(uid).get();
+
+      if (userDoc.exists) {
+        Map<String, dynamic> userData =
+            userDoc.data() as Map<String, dynamic>;
+
+        // Navigate based on the userType
+        if (userData['userType'] == 'admin') {
+          navigate(AppRoutes.adminPage);
+        } else if (userData['userType'] == 'instructor') {
+          navigate(AppRoutes.instructorHome);
+        } else if (userData['userType'] == 'student') {
+          navigate(AppRoutes.studentHome);
+        } else {
+          throw Exception('Unknown user type');
+        }
+      } else {
+        throw Exception('User data not found');
+      }
+    } on FirebaseAuthException catch (e) {
       throw Exception(e.message);
     } catch (e) {
       throw Exception('An unknown error occurred: $e');

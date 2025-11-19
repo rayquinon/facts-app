@@ -203,7 +203,7 @@ Ensure you process all pages to find all students listed in the table, regardles
     } on TypeError {
       _showSnackbar('AI output is malformed (missing required fields).', isError: true);
     } catch (e) {
-      print('Extraction/Save Error: $e');
+      debugPrint('Extraction/Save Error: $e');
       _showSnackbar('Extraction failed: $e', isError: true);
     } finally {
       if (mounted) {
